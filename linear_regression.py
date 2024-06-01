@@ -3,10 +3,11 @@ import numpy as np
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_squared_error, r2_score
 import sqlite3
+from kelly_criterion import kelly_criterion
 
 # Łączenie z bazą danych
 conn = sqlite3.connect('database.sqlite')
-query_match = "SELECT * FROM Match;"
+query_match = "SELECT * FROM Match WHERE B365A IS NOT NULL AND B365H IS NOT NULL;"
 query_team = "SELECT * FROM Team;"
 matches = pd.read_sql(query_match, conn)
 teams = pd.read_sql(query_team, conn)
@@ -87,7 +88,7 @@ def calculate_probability(match_id):
         test_data['id'] == match_id]  # Można też podać konkretny mecz, np. test_data[test_data['id'] == specific_id]
 
     # Wyodrębnienie cech dla przykładowego meczu
-    sample_features = sample_match[features].values.reshape(1, -1)
+    sample_features = sample_match[features]
 
     # Predykcja liczby bramek dla drużyn gospodarzy i gości
     predicted_home_goals = model_home.predict(sample_features)[0]
@@ -112,7 +113,7 @@ def calculate_probability(match_id):
     mean = 0
     std_dev = 0.1  # Standardowe odchylenie, można dostosować na podstawie danych
     draw_prob = (1 - (home_win_prob + away_win_prob)) * (
-                np.exp(-0.5 * (goal_difference / std_dev) ** 2) / (std_dev * np.sqrt(2 * np.pi)))
+            np.exp(-0.5 * (goal_difference / std_dev) ** 2) / (std_dev * np.sqrt(2 * np.pi)))
 
     # Normalizacja prawdopodobieństw do 100%
     total_prob = home_win_prob + away_win_prob + draw_prob
@@ -125,15 +126,65 @@ def calculate_probability(match_id):
     print(f'Szansa na remis: {draw_prob:.2f}%')
 
     if home_win_prob > away_win_prob:
-        return 'H'
-    return 'A'
+        return 'H', home_win_prob / 100
+    return 'A', away_win_prob / 100
 
 
-good_guesses = 0
-total_guesses = test_data[test_data['result'] != 'D'].shape[0]
+def calculate_accuracy():
+    good_guesses = 0
+    total_guesses = test_data[test_data['result'] != 'D'].shape[0]
 
-for index, row in test_data.iterrows():
-    if row['result'] == calculate_probability(row['id']):
-        good_guesses += 1
+    for index, row in test_data.iterrows():
+        if row['result'] == calculate_probability(row['id'])[0]:
+            good_guesses += 1
 
-print(f"accuracy:", good_guesses / total_guesses)
+    print(f"accuracy:", good_guesses / total_guesses)
+
+
+def bet_with_kelly_criterion(match_id, budget):
+    predicted_winner, probability = calculate_probability(match_id)
+    sample_match = test_data[test_data['id'] == match_id]
+    home_odds = sample_match['B365H'].iloc[0]
+    print("Kurs na gospodarza", home_odds)
+    away_odds = sample_match['B365A'].iloc[0]
+    print("Kurs na gości", away_odds)
+
+    if predicted_winner == 'H':
+        odd_in_consideration = home_odds
+        suggested_bet = kelly_criterion(probability, odd_in_consideration)
+    elif predicted_winner == 'A':
+        odd_in_consideration = away_odds
+        suggested_bet = kelly_criterion(probability, odd_in_consideration)
+
+    suggested_stake = budget * suggested_bet
+
+    print("Sugerowana stawka zakładu to: ", suggested_stake,
+          f'na drużynę {"Gospodarzy" if predicted_winner == "H" else "gości"}')
+
+    return suggested_stake, predicted_winner, odd_in_consideration
+
+
+random_matches = test_data.sample(n=10)
+
+total_diff = 0
+
+for i in range(1):
+    budget = 10
+    for index, match in random_matches.iterrows():
+        suggested_bet, predicted_winner, odd = bet_with_kelly_criterion(match['id'], budget)
+        print(suggested_bet, odd)
+        print("Budżet przed zakładem", budget)
+        if match['result'] == predicted_winner and suggested_bet > 0:
+            budget -= suggested_bet
+            budget += suggested_bet * odd
+        elif suggested_bet < 0:
+            print("Nie obstawiono meczu")
+        else:
+            budget -= suggested_bet
+        print("Budżet po zakladzie:", budget)
+
+    print("Budżet koncowy", budget)
+    total_diff += budget -10
+
+
+print(total_diff)
